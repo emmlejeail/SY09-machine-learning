@@ -1,0 +1,623 @@
+---
+title: "Projet2-SY09"
+output: html_notebook
+---
+
+## Fonctions outils
+
+```{r}
+set.seed(123)
+library(MASS)
+library(e1071)
+library(rpart)
+library(mvShapiroTest)
+
+
+split_data <- function(X,z, propotest=.1)
+{
+  perm <- sort(runif(nrow(X)), index.return=TRUE)$ix
+  appidx <- perm[1:floor(nrow(X)*(1-propotest))]
+  testidx <- perm[floor(nrow(X)*(1-propotest)+1):nrow(X)]
+  return(list(Xapp = X[appidx,], zapp = z[appidx], Xtest=X[testidx,], ztest=z[testidx]))
+}
+
+calculCumulInertie = function(vp) {
+  res = {}
+  s = 0
+  somme = sum(vp)
+  for (x in vp) {
+    s = s + x
+    res = c(res, (s/somme)*100)
+  }
+  res
+}
+
+calcul_taux_err <- function(pred, reel)
+{
+  err <- 0
+  misplaced <- {}
+  for (i in (1:length(pred))){
+    if (pred[i]!=reel[i]){
+      err = err+1
+      misplaced <- cbind(misplaced, i)
+    }
+  }
+  return(list(taux = err/length(pred), misplaced = misplaced))
+}
+
+select_class <- function(prediction){
+  res <- apply(prediction, 1, function(x){
+    if(x[1]>x[2]){
+      x[1] <- 1
+    }
+    else{
+      x[1] <- 2
+    }
+  })
+  return(res)
+}
+```
+
+```{r}
+# Permet de tester un modèle N fois sur N échantillons d'apprentissage et de test séparés au hasard
+testNfois <- function(X, z, fun, N=20){
+  err <- {}
+  res <- {}
+  for(i in 1:N){
+    data <- split_data(X, z, 0.25)
+    if (fun=="lda"){
+      adlapp <- lda(data$Xapp, data$zapp)
+      res <- rbind(res, predict(adlapp, data$Xtest)$class)
+      err<-rbind(err, calcul_taux_err(res[i,], data$ztest)$taux)
+    }
+    if(fun=="adq"){
+      adqapp <- qda(data$Xapp, data$zapp)
+      res <- rbind(res, predict(adqapp, data$Xtest)$class)
+      err<-rbind(err, calcul_taux_err(res[i,], data$ztest)$taux)
+    }
+    if(fun=="glm"){
+      modele<- glm(as.factor(data$zapp)~.,data=data$Xapp,family=binomial)
+      prediction<-predict(modele,newdata=data$Xtest,type='response')
+      perf <-table(data$ztest, prediction>0.5)
+  
+      err <- rbind(err, 1-(sum(diag(perf))/length(data$ztest)))
+    }
+    if(fun=="naiveBayes"){
+      nbapp <- naiveBayes(data$Xapp, as.factor(data$zapp))
+      res <- rbind(res, predict(nbapp, data$Xtest))
+      err<-rbind(err, calcul_taux_err(res[i,], data$ztest)$taux)
+    }
+    if(fun=="tree"){
+      treeapp <- rpart(data$zapp~.,
+  	method="class", data=data$Xapp)
+      treeappp<- prune(treeapp, cp=   treeapp$cptable[which.min(treeapp$cptable[,"xerror"]),"CP"])
+      treeprobs <- predict(treeappp, data$Xtest, method="class")
+
+      res <- rbind(res, select_class(treeprobs))
+      err <- rbind(err, calcul_taux_err(res[i,], data$ztest)$taux)
+    }
+  }
+  err.mean <- mean(err)
+  return(list(mean = err.mean, erreurs = err))
+}
+```
+
+```{r}
+# permet de tester tous les modèles (ADQ, ADL, GLM, NaiveBayes, Tree) N fois sur un jeu de données
+testAllModels <- function(X, z, N=20){
+  res <- {}
+  res <- cbind(res, testNfois(X, z, "lda", N=N)$erreurs)
+  res <- cbind(res, testNfois(X, z, "adq", N=N)$erreurs)
+  res <- cbind(res, testNfois(X, z, "glm", N=N)$erreurs)
+  res <- cbind(res, testNfois(X, z, "naiveBayes", N=N)$erreurs)
+  res<- cbind(res, testNfois(X, z, "tree", N=N)$erreurs)
+  colnames(res) <- c("adl","adq","glm", "nBayes", "arbre")
+  return(res)
+}
+```
+
+
+
+## Données Breastcancer
+
+```{r}
+breastcancer <- read.csv('./donnees/breastcancer.csv', header=TRUE) 
+breastcancer <- breastcancer[,-1]
+
+dim(breastcancer)
+
+# séparation en X et z
+bcz <- breastcancer[,31]
+bcX <- breastcancer[,-31]
+
+# séparation par classes et étude de la matrice de covariance
+bc.class1 <- bcX[which(breastcancer$Z==1),]
+cov.wt(bc.class1)
+bc.class2 <- bcX[which(breastcancer$Z==2),]
+cov.wt(bc.class2)
+
+# Test de normalité multivarié pour les variables conditionnellement à la classe
+bc.norm.c1 <- apply(bcX[bcz == 1,], 2, mvShapiro.Test)
+bc.norm.c2 <- apply(bcX[bcz == 2,], 2, mvShapiro.Test)
+# classes non gaussiennes
+
+# Sans PCA
+bc.res <- testAllModels(bcX, bcz, N=50)
+boxplot(bc.res)
+
+# Avec PCA
+bcX.pca <- prcomp(bcX, scale=TRUE)
+
+# isoler le nombre de composantes pour atteindre 90% de bonne représentation
+bc.prop <- calculCumulInertie(bcX.pca$sdev)
+print(bc.prop)
+plot(bc.prop, main="Breastcancer")
+
+jpeg("pca_breastcancer.jpeg")
+plot(bcX.pca$x, col=bcz, main="Données Breastcancer dans le premier plan factoriel colorées selon les classes") # frontière relativement linéaire
+dev.off()
+
+bc.res.pca <- testAllModels(as.data.frame(bcX.pca$x[,1:17]), bcz)
+jpeg("res_breastcancer_models.jpeg")
+boxplot(bc.res.pca, main="Boxplot des taux d'erreurs des différents modèles pour les données Breastcancer")
+dev.off()
+
+bc.class1 <- breastcancer[which(breastcancer$Z==1),]
+cov.wt(bc.class1)
+bc.class2 <- breastcancer[which(breastcancer$Z==2),]
+cov.wt(bc.class2)
+
+cor.test(bcX[,7],bcX[,1]) # indépendance
+cor.test(bcX[,1], bcX[,2]) # pas d'indépendance
+for (i in 1:(dim(bcX)[2]-1)){
+  print(cor.test(bcX[,i], bcX[,i+1]))
+}
+```
+
+## Données Ionosphere
+
+```{r}
+ionosphere <- read.csv('./donnees/ionosphere.csv', header=TRUE)
+dim(ionosphere)
+ionosphere <- ionosphere[,-1]
+
+# on récupère z
+ioz <- ionosphere[,35]
+
+io_inter <- ionosphere[,-2] #on retire une variable qui vaut 0 partout et donc sans intérêt
+# on isole X
+ioX <- io_inter[,-34]
+
+# séparation par classes et étude de la matrice de covariance
+io.class1 <- ioX[which(ionosphere$Z==1),]
+cov.wt(io.class1)
+io.class2 <- ioX[which(ionosphere$Z==2),]
+cov.wt(io.class2)
+
+# Test de normalité multivariée des variables selon la classe
+apply(ioX[ioz == 2,], 2, mvShapiro.Test) # classe non gaussienne
+
+cor.test(io.class1[,2],io.class1[,10]) #non indépendance
+
+# calcul de la PCA
+pca.ioX <- prcomp(ioX, scale=TRUE)
+
+# sélection du nombre de composantes représentatives
+io.prop <- calculCumulInertie(pca.ioX$sdev)
+plot(io.prop, main="Ionosphere")
+
+jpeg("pca_ionosphere.jpeg")
+plot(pca.ioX$x, col=ioz, main="Données Ionosphere dans le premier plan factoriel colorées selon les classes")
+dev.off()
+
+io.pca.res <- testAllModels(as.data.frame(pca.ioX$x[,1:26]), ioz)
+jpeg("res_io_models.jpeg")
+boxplot(io.pca.res, main="Boxplot des taux d'erreurs des différents modèles pour les données Ionosphère")
+dev.off()
+
+cor.test(ioX[,1],ioX[,10])
+
+new_ioX <- ioX[,-1]
+head(new_ioX)
+io.res <- testAllModels(new_ioX, ioz)
+boxplot(io.res)
+```
+
+## Données Sonar
+
+```{r}
+sonar <- read.csv('./donnees/sonar.csv', header=TRUE)
+dim(sonar)
+sonar<-sonar[,-1]
+
+# séparation des données en X et z
+sonarz <- sonar$Z
+sonarX <- sonar[,-61]
+
+# séparation des classes et étude de leur matrice de covariance
+sonar.class1 <- sonarX[which(sonar$Z==1),]
+cov.wt(sonar.class1)
+sonar.class2 <- sonarX[which(sonar$Z==2),]
+cov.wt(sonar.class2)
+
+# test de normalité multivarié des variables conditionnellement à la classe
+apply(sonarX[sonarz == 1,], 2, mvShapiro.Test)
+apply(sonarX[sonarz == 2,], 2, mvShapiro.Test)
+#classes non gaussiennes
+
+cor.test(sonar.class1[,2],sonar.class1[,10]) #non indépendance
+cor.test(sonar.class2[,2],sonar.class2[,10]) #non indépendance
+
+# pca sur sonar
+sonar.pca <- prcomp(sonarX, scale=TRUE)
+
+sonar.prop <- calculCumulInertie(sonar.pca$sdev)
+print(sonar.prop)
+plot(sonar.prop, main="Sonar")
+
+jpeg("pca_sonar.jpeg")
+plot(sonar.pca$x, col=sonarz, main="Données Sonar dans le premier plan factoriel colorées selon les classes")
+dev.off()
+
+sonar.res <- testAllModels(sonarX, sonarz)
+jpeg("res_sonar_models.jpeg")
+boxplot(sonar.res, main="Boxplot des taux d'erreurs des différents modèles pour les données Sonar")
+dev.off()
+
+sonar.pca.res <- testAllModels(as.data.frame(sonar.pca$x[,1:39]), sonarz)
+```
+
+## Données Spambase
+```{r}
+spambase <- read.csv('./donnees/spambase.csv', header=TRUE)
+spambase <- spambase[, -1]
+
+# division des données en X et z
+spambaseX <- spambase[, -58]
+spambasez <- spambase[,58]
+
+# séparation des deux classes et études de leurs matrices de covariances
+spambase.class1 <- spambaseX[which(spambase$Z==1),]
+cov.wt(spambase.class1)
+spambase.class2 <- spambaseX[which(spambase$Z==2),]
+cov.wt(spambase.class2)
+
+# test de normalité multivarié des variables avec le test de Shapiro pour chaque classes
+apply(spambaseX[spambasez == 1,], 2, mvShapiro.Test)
+apply(spambaseX[spambasez == 2,], 2, mvShapiro.Test)
+#classes ne suivent pas une distribution gaussienne
+
+# p.value des tests de pearson les deux classes confondues
+spambase.cor<- array(0, c(dim(spambaseX)[2], dim(spambaseX)[2]))
+for(i in 1:(dim(spambaseX)[2]-1))
+{
+  for(j in 1:(dim(spambaseX)[2]))
+  {
+    spambase.cor[i,j] <- cor.test(spambaseX[,i],spambaseX[,j])$p.value
+  }
+}
+colnames(spambase.cor) <- colnames(spambaseX)
+row.names(spambase.cor) <- colnames(spambaseX)
+colMeans(spambase.cor)
+
+# table des p.value pour le test de Pearson sur chaque pair de variable pour la classe 1
+spambase.cor.c1<- array(0, c(dim(spambase.class1)[2], dim(spambase.class1)[2]))
+for(i in 1:((dim(spambase.class1)[2]-1)/2))
+{
+  for(j in 1:(dim(spambase.class1)[2]))
+  {
+    spambase.cor.c1[i,j] <- cor.test(spambase.class1[,i],spambase.class1[,j])$p.value
+  }
+}
+colnames(spambase.cor.c1) <- colnames(spambase.class1)
+row.names(spambase.cor.c1) <- colnames(spambase.class1)
+colMeans(spambase.cor.c1)
+
+# table des p.value pour le test du chi2 sur chaque pair de variable pour la classe 2
+spambase.cor.c2<- array(0, c(dim(spambase.class2)[2], dim(spambase.class2)[2]))
+for(i in 1:(dim(spambase.class2)[2]-1))
+{
+  for(j in 1:(dim(spambase.class2)[2]))
+  {
+    spambase.cor.c2[i,j] <- cor.test(spambase.class2[,i],spambase.class2[,j])$p.value
+  }
+}
+colnames(spambase.cor.c2) <- colnames(spambase.class2)
+row.names(spambase.cor.c2) <- colnames(spambase.class2)
+colMeans(spambase.cor.c2)
+
+# Test de normalité multivarié selon les classes sur chaque variables
+apply(spambaseX[spambasez == 1,], 2, mvShapiro.Test)
+apply(spambaseX[spambasez == 2,], 2, mvShapiro.Test)
+# classes à priori non gaussiennes
+
+new_spambaseX <- spambaseX[,-4]
+new_spambaseX$X2 <- NULL
+new_spambaseX$X14 <- NULL
+new_spambaseX$X22 <- NULL
+new_spambaseX$X32 <- NULL
+new_spambaseX$X33 <- NULL
+new_spambaseX$X34 <- NULL
+new_spambaseX$X35 <- NULL
+new_spambaseX$X36 <- NULL
+new_spambaseX$X38 <- NULL
+new_spambaseX$X41 <- NULL
+new_spambaseX$X42 <- NULL
+new_spambaseX$X44 <- NULL
+new_spambaseX$X47 <- NULL
+new_spambaseX$X48 <- NULL
+new_spambaseX$X49 <- NULL
+new_spambaseX$X54 <- NULL
+new_spambaseX$X55 <- NULL
+spambase.res <- testAllModels(new_spambaseX, spambasez)
+boxplot(spambase.res)
+colMeans(spambase.res)
+
+# application de la PCA
+spambase.pca <- prcomp(spambaseX, scale=TRUE)
+
+# calcul du nombre de composantes principales à prendre en compte pour atteindre 90% de reprensation
+spambase.prop <- calculCumulInertie(spambase.pca$sdev)
+print(spambase.prop)
+
+cov.wt(spambaseX)
+
+colMeans(cor(spambaseX))
+
+print(spambase.pca$rotation[,1:3])
+plot(spambase.prop, main="Spambase")
+
+jpeg("pca_spambase.jpeg")
+plot(spambase.pca$x, col=spambasez, main="Données Spambase dans le premier plan factoriel colorées selon les classes")
+dev.off()
+
+spambase.pca.res <- testAllModels(as.data.frame(spambase.pca$x[,1:47]), spambasez)
+jpeg("res_spambase_models.jpeg")
+boxplot(spambase.res, main="Boxplot des taux d'erreurs des différents modèles pour les données Spambase")
+dev.off()
+```
+
+## Données Spambase2
+```{r}
+spambase2 <- read.csv('./donnees/spambase2.csv', header=TRUE)
+summary(spambase2)
+spambase2 <- spambase2[,-1]
+
+# division des données en X et z
+spambase2X <- spambase2[,-58]
+spambase2z <- spambase2[,58]
+
+# séparation des deux classes et études de leurs matrices de covariances
+spambase2.class1 <- spambase2X[which(spambase2$Z==1),]
+cov.wt(spambase2.class1)
+spambase2.class2 <- spambase2X[which(spambase2$Z==2),]
+cov.wt(spambase2.class2)
+
+# test de normalité multivariée sur chaque variable pour chaque classe
+apply(spambase2X[spambase2z == 1,], 2, mvShapiro.Test)
+apply(spambase2X[spambase2z == 2,], 2, mvShapiro.Test)
+# classes ne suivent pas une loi normale multivariée
+
+spambase2.cor<- array(0, c(dim(spambase2X)[2], dim(spambase2X)[2]))
+for(i in 1:(dim(spambase2X)[2]-1))
+{
+  for(j in 1:(dim(spambase2X)[2]))
+  {
+    spambase2.cor[i,j] <- cor.test(spambase2X[,i],spambase2X[,j])$p.value
+  }
+}
+colnames(spambase2.cor) <- colnames(spambase2X)
+row.names(spambase2.cor) <- colnames(spambase2X)
+colMeans(spambase2.cor)
+
+
+# table des p.value pour le test de Pearson sur chaque pair de variable pour la classe 1
+spambase2.cor.c1<- array(0, c(dim(spambase2.class1)[2], dim(spambase2.class1)[2]))
+for(i in 1:(dim(spambase2.class1)[2]-1))
+{
+  for(j in 1:(dim(spambase2.class1)[2]))
+  {
+    spambase2.cor.c1[i,j] <- cor.test(spambase2.class1[,i],spambase2.class1[,j])$p.value
+  }
+}
+colnames(spambase2.cor.c1) <- colnames(spambase2.class1)
+row.names(spambase2.cor.c1) <- colnames(spambase2.class1)
+spambase2.cor.c1
+
+# table des p.value pour le test de Pearson sur chaque pair de variable pour la classe 2
+spambase2.cor.c2<- array(0, c(dim(spambase2.class2)[2], dim(spambase2.class2)[2]))
+for(i in 1:(dim(spambase2.class2)[2]-1))
+{
+  for(j in 1:(dim(spambase2.class2)[2]))
+  {
+    spambase2.cor.c2[i,j] <- cor.test(spambase2.class2[,i],spambase2.class2[,j])$p.value
+  }
+}
+colnames(spambase2.cor.c2) <- colnames(spambase2.class2)
+row.names(spambase2.cor.c2) <- colnames(spambase2.class2)
+spambase2.cor.c2
+
+new_spambase2X <- spambase2X[,-4]
+new_spambase2X$X10 <- NULL
+new_spambase2X$X19 <- NULL
+new_spambase2X$X22 <- NULL
+new_spambase2X$X31 <- NULL
+new_spambase2X$X32 <- NULL
+new_spambase2X$X33 <- NULL
+new_spambase2X$X34 <- NULL
+new_spambase2X$X35 <- NULL
+new_spambase2X$X36 <- NULL
+new_spambase2X$X37 <- NULL
+new_spambase2X$X38 <- NULL
+new_spambase2X$X39 <- NULL
+new_spambase2X$X41 <- NULL
+new_spambase2X$X42 <- NULL
+new_spambase2X$X44 <- NULL
+new_spambase2X$X46 <- NULL
+new_spambase2X$X47 <- NULL
+new_spambase2X$X48 <- NULL
+new_spambase2X$X55 <- NULL
+
+
+summary(new_spambase2X)
+spambase2.res <- testAllModels(new_spambase2X, spambase2z)
+boxplot(spambase2.res)
+colMeans(spambase2.res)
+
+# matrice de corrélation du jeu de données
+cor(spambase2X)
+
+# application de la PCA
+spambase2.pca <- prcomp(spambase2X, scale=TRUE)
+
+# nombre de composantes principales à sélectionner
+spambase2.prop <- calculCumulInertie(spambase2.pca$sdev)
+print(spambase2.prop)
+plot(spambase2.prop, main="Spambase2")
+
+jpeg('plot_pca_spambase2.jpeg')
+plot(spambase2.pca$x, col=spambase2z, main="Données Spambase2 dans le premier plan factoriel colorées selon les classes")
+dev.off()
+
+spambase2.pca.res <- testAllModels(as.data.frame(spambase2.pca$x[,1:48]), spambase2z)
+
+jpeg("res_spambase2_models.jpeg")
+boxplot(spambase2.res, main="Boxplot des taux d'erreurs des différents modèles pour les données Spambase2")
+dev.off()
+```
+
+## Programmation
+```{r}
+binaryNBCfit <- function(X, z)
+{
+  n <- dim(X)[1]
+  p <- dim(X)[2]
+  g <- max(unique(z))
+  
+  result <- NULL
+  result$pik <- rep(0,g)
+  result$pkj <- array(0,c(g,p))
+  
+  for( k in 1:g){
+    indk <- which(z==k)
+    result$pik[k] = length(indk)/n
+    result$pkj[k,] <- colMeans(X[indk,])
+  }
+  result
+}
+
+binaryNBCval <- function(pik, pkj, Xtst){
+  g <- length(pik)
+  p <- dim(pkj)[2]
+  n <- dim(Xtst)[1]
+  
+  
+  result <- NULL
+  result$prob <- array(0,c(n,g))
+  result$pred <- rep(0, n)
+  fkv <- array(0,c(n, g))
+  
+  for (i in 1:n){
+    for (k in 1:g) {
+      fkv[i,k] <- prod(pkj[k,] ** Xtst[i,] * (1-pkj[k,]) ** (1 - Xtst[i,]))
+    }
+  }
+  
+  sumprob <- {}
+  
+  for ( i in 1:n){
+    fpi <- {}
+    for( k in 1:g){
+      fpi[k] <- pik[k] * fkv[i,k]
+    }
+    sumprob[i] = sum(fpi)
+  }
+  
+  for (i in 1:n){
+    for (k in 1:g) {
+      result$prob[i, k] <- (fkv[i,k] * pik[k]) / sumprob[i]
+    }
+  }
+  
+  for( i in 1:n) {
+    if (result$prob[i,1] > result$prob[i,2]){
+      result$pred[i] = 1;
+    }else {
+      result$pred[i] = 2;
+    }
+  }
+  result
+}
+```
+
+## Tests
+```{r}
+
+binary.err <- {}
+
+for (i in 1:20){
+  spambase2_split <- split_data(spambase2X, spambase2z)
+  spambase2.fit <- binaryNBCfit(spambase2_split$Xapp, spambase2_split$zapp)
+  spambase2.val <- binaryNBCval(spambase2.fit$pik, spambase2.fit$pkj, spambase2_split$Xtest)
+  binary.err <- rbind(binary.err, calcul_taux_err(spambase2.val$pred, spambase2_split$ztest)$taux)
+}
+# erreur moyenne sur 20 itérations
+mean(binary.err)
+
+#boxplot des erreurs
+jpeg("spambase2-binary.jpeg")
+boxplot(binary.err, main="Spambase2 avec binaryNBCfit")
+dev.off()
+```
+
+```{r}
+png("pca_results.png", width=1500, height = 1000)
+par(mfrow=c(2,3))
+#Affichage des données sur le premier plan factoriel
+plot(bcX.pca$x, col=bcz, main="Breastcancer")
+legend("topright", col=c(1, 2), pch=c(1,1), legend=c("Classe 1", "Classe2"))
+
+plot(pca.ioX$x, col=ioz, main="Ionosphere")
+legend("topright", col=c(1, 2), pch=c(1,1), legend=c("Classe 1", "Classe2"))
+
+plot(sonar.pca$x, col=sonarz, main="Sonar")
+legend("topright", col=c(1, 2), pch=c(1,1), legend=c("Classe 1", "Classe2"))
+
+plot(spambase.pca$x, col=spambasez, main="Spambase")
+legend("topright", col=c(1, 2), pch=c(1,1), legend=c("Classe 1", "Classe2"))
+
+plot(spambase2.pca$x, col=spambase2z, main="Spambase2")
+legend("topright", col=c(1, 2), pch=c(1,1), legend=c("Classe 1", "Classe2"))
+
+dev.off()
+```
+
+
+```{r}
+jpeg("results-models.jpeg", width = 1000, height = 1000)
+par(mfrow=c(2,2))
+#Affichage des données sur le premier plan factoriel
+boxplot(bc.res, main="Breastcancer")
+
+boxplot(bc.res.pca, main= "Breastcancer PCA")
+
+boxplot(io.res, main="Ionosphere")
+
+boxplot(io.pca.res, main="Ionosphere PCA")
+dev.off()
+
+jpeg("results-models2.jpeg", width = 1000, height = 1000)
+par(mfrow=c(3,2))
+boxplot(sonar.res, main="Sonar")
+
+boxplot(sonar.pca.res, main="Sonar PCA")
+
+boxplot(spambase.res, main="Spambase")
+
+boxplot(spambase.pca.res, main="Spambase PCA")
+
+boxplot(spambase2.res, main="Spambase2")
+
+boxplot(spambase2.pca.res, main="Spambase2 PCA")
+dev.off()
+```
